@@ -1,0 +1,10 @@
+{
+  "name": "gestor-api",
+  "version": "1.0.0",
+  "private": true,
+  "engines": { "node": "18.x" },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20.11.0"
+  }
+}
