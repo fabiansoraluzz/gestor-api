@@ -1,10 +1,12 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { cors } from "../../lib/cors";
 import { supabaseServer } from "../../lib/supabase";
 import { forgotSchema } from "../../lib/validate";
 
 const DEFAULT_REDIRECT = process.env.PASSWORD_RESET_REDIRECT || "http://localhost:5173/auth/reset";
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  if (cors(req, res)) return; 
   if (req.method !== "POST") return res.status(405).end();
 
   const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
