@@ -1,9 +1,11 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { cors } from "../../lib/cors";
 import { supabaseServer } from "../../lib/supabase";
 import { loginSchema } from "../../lib/validate";
 import { setRefreshCookie } from "../../lib/cookies";
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  if (cors(req, res)) return; 
   // Preflight CORS (por si el front lo envía)
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST")   return res.status(405).end();

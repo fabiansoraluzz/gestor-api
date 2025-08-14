@@ -1,9 +1,12 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { cors } from "../../lib/cors";
 import { supabaseServer } from "../../lib/supabase";
 import { registerSchema } from "../../lib/validate";
 import { setRefreshCookie } from "../../lib/cookies";
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  if (cors(req, res)) return; 
+
   if (req.method !== "POST") return res.status(405).end();
 
   const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
