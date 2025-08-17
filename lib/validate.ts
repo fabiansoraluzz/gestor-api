@@ -46,7 +46,6 @@ export const resetPasswordSchema = z.object({
 
 // ===== Patrón (endpoints futuros) =====
 export const setPatternSchema = z.object({
-  email,
   pattern: z.string().min(4, "Patrón inválido"),
 });
 

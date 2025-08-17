@@ -1,15 +1,15 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { cors } from "../../../lib/cors";
-import { supabaseServer, supabaseAdmin } from "../../../lib/supabase";
-import { patternSetSchema, patternLoginSchema } from "../../../lib/validate";
-import { hashPattern, verifyPattern } from "../../../lib/pattern";
+import { supabaseAdmin } from "../../../lib/supabase";
+import { patternLoginSchema } from "../../../lib/validate";
+import { verifyPattern } from "../../../lib/pattern";
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (cors(req, res)) return;
   if (req.method !== "POST") return res.status(405).end();
 
   try {
-    const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body ?? {};
+    const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body ?? {});
     const { email, pattern } = patternLoginSchema.parse(body);
 
     const { data, error } = await supabaseAdmin
@@ -23,7 +23,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const ok = verifyPattern(pattern, data.salt, data.hash);
     if (!ok) return res.status(401).json({ error: "Patrón inválido" });
 
-    // TODO: emitir sesión de Supabase (OTP/magic link o password derivada del patrón).
+    // TODO: canjear por sesión real de Supabase (OTP o magic link server-side)
     return res.status(501).json({
       ok: true,
       message: "Patrón válido. Falta canjear por sesión de Supabase.",
