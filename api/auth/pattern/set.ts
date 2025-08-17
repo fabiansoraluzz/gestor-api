@@ -9,20 +9,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (cors(req, res)) return;
   if (req.method !== "POST") return res.status(405).end();
 
-  const ct = (req.headers["content-type"] || "").toString();
-  if (!ct.includes("application/json")) {
-    return res.status(415).json({ error: "Content-Type debe ser application/json" });
-  }
-
-  // Bearer token obligatorio
   const bearer = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
   if (!bearer) return res.status(401).json({ error: "Sin token" });
 
   try {
     const raw = typeof req.body === "string" ? JSON.parse(req.body) : (req.body ?? {});
-    const { pattern } = setPatternSchema.parse(raw); // 👈 solo pattern
+    const { pattern } = setPatternSchema.parse(raw);
 
-    // Validar token y obtener usuario
+    // Validar token de usuario
     const anon = supabaseServer();
     const { data: u, error: eUser } = await anon.auth.getUser(bearer);
     if (eUser || !u?.user) return res.status(401).json({ error: "Token inválido" });
@@ -31,7 +25,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const { salt, hash } = hashPattern(pattern);
     const { error } = await supabaseAdmin.from("auth_patterns").upsert({
       user_id: u.user.id,
-      email: u.user.email!,   // 👈 lo tomamos del token, no del body
+      email: u.user.email!,
       salt,
       hash,
     });
