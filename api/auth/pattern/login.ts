@@ -14,64 +14,74 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const raw = typeof req.body === "string" ? JSON.parse(req.body) : (req.body ?? {});
     const { email, pattern, recordarme } = patternLoginSchema.parse(raw);
 
-    if (!email) {
-      return res.status(400).json({ error: "Falta email (por ahora el login por patrón requiere email)" });
+    // 1) Tomar salt/hash del patrón con Service Role (bypassa RLS)
+    const { data: pat, error: ePat } = await supabaseAdmin
+      .from("auth_patterns")
+      .select("user_id, salt, hash")
+      .eq("email", email)
+      .single();
+
+    if (ePat || !pat) {
+      return res.status(401).json({ error: "Patrón no configurado" });
     }
 
-    // 1) Traer salt+hash del patrón
-    const { data: row, error: eRow } = await supabaseAdmin
-      .from("auth_patterns")
-      .select("salt, hash")
-      .eq("email", email)
-      .maybeSingle();
-
-    if (eRow) return res.status(400).json({ error: eRow.message });
-    if (!row?.salt || !row?.hash) return res.status(401).json({ error: "Patrón no configurado" });
-
     // 2) Verificar patrón
-    const ok = verifyPattern(pattern, row.salt, row.hash);
+    const ok = verifyPattern(pattern, pat.salt, pat.hash);
     if (!ok) return res.status(401).json({ error: "Patrón inválido" });
 
-    // 3) Generar OTP tipo magiclink y canjearlo por sesión en el servidor
-    const { data: link, error: eLink } = await supabaseAdmin.auth.admin.generateLink({
+    // 3) Generar magic link admin y extraer el token_hash (según la versión)
+    const { data: link, error: eGen } = await (supabaseAdmin as any).auth.admin.generateLink({
       type: "magiclink",
       email,
+      // options: { redirectTo: process.env.MAGIC_REDIRECT ?? "https://example.com" } // opcional
     });
-    if (eLink) return res.status(400).json({ error: eLink.message });
+    if (eGen || !link) {
+      return res.status(500).json({ error: eGen?.message ?? "No se pudo generar magic link" });
+    }
 
-    // En supabase-js v2 el token_hash viene dentro de properties.email_otp.token_hash
-    const token_hash =
-      // @ts-ignore - defensivo por si cambia la forma
-      link?.properties?.email_otp?.token_hash ||
-      // @ts-ignore
-      link?.email_otp?.token_hash;
+    // Diferentes lugares posibles del token hash según la versión:
+    const tokenHash =
+      (link as any)?.hashed_token ??
+      (link as any)?.properties?.hashed_token ??
+      (link as any)?.properties?.email_otp?.hashed_token ??
+      (link as any)?.email_otp?.hashed_token;
 
-    if (!token_hash) {
+    if (!tokenHash) {
+      // Para depurar, puedes loguear las keys de link (en dev), pero no devuelvas todo al cliente en prod.
       return res.status(500).json({ error: "No se pudo obtener token_hash del magic link" });
     }
 
-    // Canjear token_hash -> crear sesión
-    const anon = supabaseServer();
-    const { data: verified, error: eVerify } = await anon.auth.verifyOtp({
-      email,
-      token_hash,
+    // 4) Canjear token_hash => sesión de Supabase
+    const anon = supabaseServer(); // cliente público
+    const { data: ses, error: eVerify } = await anon.auth.verifyOtp({
       type: "magiclink",
+      email,
+      token_hash: tokenHash,
     });
-    if (eVerify || !verified?.session) {
-      return res.status(400).json({ error: eVerify?.message || "No se pudo crear la sesión" });
+
+    if (eVerify || !ses?.session || !ses?.user) {
+      return res.status(401).json({ error: eVerify?.message ?? "No se pudo iniciar sesión" });
     }
 
-    // 4) Opcional: persistir refresh token en cookie si el usuario quiere "Recordarme"
-    if (verified.session.refresh_token) {
-      setRefreshCookie(res, verified.session.refresh_token, Boolean(recordarme));
+    // 5) Cookie refresh opcional (si quieres remember me)
+    if (ses.session.refresh_token) {
+      setRefreshCookie(res, ses.session.refresh_token, Boolean(recordarme));
     }
+
+    const nombre =
+      (ses.user.user_metadata?.full_name as string | undefined) ??
+      (ses.user.user_metadata?.name as string | undefined) ??
+      ses.user.email?.split("@")[0] ??
+      "Usuario";
 
     return res.status(200).json({
-      usuarioId: verified.user?.id,
-      email: verified.user?.email,
-      accessToken: verified.session.access_token,
-      expiresIn: verified.session.expires_in,
-      tokenType: verified.session.token_type,
+      ok: true,
+      usuarioId: ses.user.id,
+      email: ses.user.email,
+      nombre,
+      accessToken: ses.session.access_token,
+      expiresIn: ses.session.expires_in,
+      tokenType: ses.session.token_type,
     });
   } catch (e: any) {
     return res.status(400).json({ error: e?.issues ?? e?.message ?? "Solicitud inválida" });
