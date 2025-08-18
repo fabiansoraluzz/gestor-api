@@ -1,11 +1,12 @@
 // api/auth/login.ts
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { cors } from "../../lib/cors";
 import { supabaseServer } from "../../lib/supabase";
-import { loginSchema, type LoginInput } from "../../lib/validate";
+import { loginSchema } from "../../lib/validate"; // <-- union (password | pattern)
 import { setRefreshCookie } from "../../lib/cookies";
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (req.method === "OPTIONS") return res.status(204).end();
+  if (cors(req, res)) return;
   if (req.method !== "POST") return res.status(405).end();
 
   const ct = req.headers["content-type"] || "";
@@ -15,48 +16,40 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   try {
     const raw = typeof req.body === "string" ? JSON.parse(req.body) : (req.body ?? {});
-    const body = loginSchema.parse(raw) as LoginInput;
+    const parsed = loginSchema.parse(raw); // <-- puede ser {email,password} o {email,pattern}
 
-    // --- Variante A: email + password (activa hoy)
-    if ("password" in body) {
-      const { email, password, recordarme } = body;
-      const supabase = supabaseServer();
-
-      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error || !data?.session || !data?.user) {
-        return res.status(401).json({ error: "Credenciales inválidas" });
-      }
-
-      if (data.session.refresh_token) {
-        setRefreshCookie(res, data.session.refresh_token, Boolean(recordarme));
-      }
-
-      const nombre =
-        (data.user.user_metadata?.full_name as string | undefined) ??
-        (data.user.user_metadata?.name as string | undefined) ??
-        data.user.email?.split("@")[0] ??
-        "Usuario";
-
-      return res.status(200).json({
-        usuarioId: data.user.id,
-        email: data.user.email,
-        nombre,
-        accessToken: data.session.access_token,
-        expiresIn: data.session.expires_in,
-        tokenType: data.session.token_type,
+    // 👇 estrechamos el tipo para garantizar que existe `password`
+    if (!("password" in parsed)) {
+      return res.status(400).json({
+        error: "Usa /api/auth/pattern/login para iniciar sesión con patrón.",
       });
     }
+    const { email, password, recordarme } = parsed;
 
-    // --- Variante B: email + pattern (planificada)
-    // Aquí validaremos el patrón contra la tabla de patrones y
-    // generaremos sesión. Lo dejamos explícito por ahora:
-    if ("pattern" in body) {
-      return res
-        .status(501)
-        .json({ error: "Inicio con patrón aún no habilitado. Usa email + contraseña de momento." });
+    const supabase = supabaseServer();
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error || !data?.session || !data?.user) {
+      return res.status(401).json({ error: "Credenciales inválidas" });
     }
 
-    return res.status(400).json({ error: "Solicitud inválida" });
+    if (data.session.refresh_token) {
+      setRefreshCookie(res, data.session.refresh_token, Boolean(recordarme));
+    }
+
+    const nombre =
+      (data.user.user_metadata?.full_name as string | undefined) ??
+      (data.user.user_metadata?.name as string | undefined) ??
+      data.user.email?.split("@")[0] ??
+      "Usuario";
+
+    return res.status(200).json({
+      usuarioId: data.user.id,
+      email: data.user.email,
+      nombre,
+      accessToken: data.session.access_token,
+      expiresIn: data.session.expires_in,
+      tokenType: data.session.token_type,
+    });
   } catch (e: any) {
     return res.status(400).json({ error: e?.issues ?? e?.message ?? "Solicitud inválida" });
   }
