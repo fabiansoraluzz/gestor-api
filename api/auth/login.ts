@@ -1,34 +1,52 @@
 // api/auth/login.ts
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { cors } from "../../lib/cors";
-import { supabaseServer } from "../../lib/supabase";
-import { loginSchema } from "../../lib/validate"; // <-- union (password | pattern)
+import { supabaseServer, supabaseAdmin } from "../../lib/supabase";
+import { loginPasswordSchema } from "../../lib/validate";
 import { setRefreshCookie } from "../../lib/cookies";
+
+function isPhone(identifier: string) {
+  return !identifier.includes("@");
+}
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (cors(req, res)) return;
   if (req.method !== "POST") return res.status(405).end();
 
-  const ct = req.headers["content-type"] || "";
-  if (!ct.toString().includes("application/json")) {
+  const ct = String(req.headers["content-type"] || "");
+  if (!ct.includes("application/json")) {
     return res.status(415).json({ error: "Content-Type debe ser application/json" });
   }
 
   try {
     const raw = typeof req.body === "string" ? JSON.parse(req.body) : (req.body ?? {});
-    const parsed = loginSchema.parse(raw); // <-- puede ser {email,password} o {email,pattern}
+    const { identifier, password, recordarme } = loginPasswordSchema.parse(raw);
 
-    // 👇 estrechamos el tipo para garantizar que existe `password`
-    if (!("password" in parsed)) {
-      return res.status(400).json({
-        error: "Usa /api/auth/pattern/login para iniciar sesión con patrón.",
-      });
+    // Resolver email si viene teléfono
+    let emailToUse = identifier;
+    if (isPhone(identifier)) {
+      const { data: prof, error: e1 } = await supabaseAdmin
+        .from("profiles")
+        .select("email")
+        .eq("phone", identifier)
+        .maybeSingle();
+      if (e1 || !prof?.email) return res.status(401).json({ error: "Credenciales inválidas" });
+      emailToUse = prof.email;
     }
-    const { email, password, recordarme } = parsed;
 
     const supabase = supabaseServer();
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: emailToUse,
+      password,
+    });
+
     if (error || !data?.session || !data?.user) {
+      const msg = (error?.message || "").toLowerCase();
+      if (msg.includes("confirm")) {
+        return res
+          .status(403)
+          .json({ error: "Debes confirmar tu correo antes de ingresar.", requiereConfirmacion: true });
+      }
       return res.status(401).json({ error: "Credenciales inválidas" });
     }
 
