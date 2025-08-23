@@ -2,63 +2,56 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { cors } from "../../lib/cors";
 import { registerSchema } from "../../lib/validate";
-import { supabaseServer, supabaseAdmin } from "../../lib/supabase";
+import { supabaseAdmin, supabaseServer } from "../../lib/supabase";
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (cors(req, res)) return;
   if (req.method !== "POST") return res.status(405).end();
 
-  const ct = String(req.headers["content-type"] || "");
+  const ct = (req.headers["content-type"] || "").toString();
   if (!ct.includes("application/json")) {
     return res.status(415).json({ error: "Content-Type debe ser application/json" });
   }
 
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body ?? {});
-    const { nombreCompleto, email, password, phone, pattern } = registerSchema.parse(body);
+    const { username, email, password, nombres, apellidos } = registerSchema.parse(body);
 
-    // 1) Crear usuario en Auth
+    // Pre-chequeo de disponibilidad de username (usa service role por RLS)
+    const { data: exists, error: e1 } = await supabaseAdmin
+      .from("perfiles")
+      .select("id")
+      .eq("usuario", username)
+      .maybeSingle();
+
+    if (e1) return res.status(500).json({ error: e1.message });
+    if (exists) return res.status(409).json({ error: "El nombre de usuario ya está en uso" });
+
+    const full_name = [nombres, apellidos].filter(Boolean).join(" ").trim();
+
     const supa = supabaseServer();
     const { data, error } = await supa.auth.signUp({
       email,
       password,
       options: {
-        data: { full_name: nombreCompleto },
-        emailRedirectTo: process.env.EMAIL_CONFIRM_REDIRECT || undefined,
+        data: {
+          username, // nuestro trigger lo tomará
+          nombres,
+          apellidos,
+          full_name, // compat
+        },
       },
     });
+
     if (error) return res.status(400).json({ error: error.message });
 
     const user = data.user || null;
     const requiereConfirmacion = !data.session;
 
-    // 2) Guardar teléfono en profiles (si se envió)
-    if (phone && user) {
-      await supabaseAdmin
-        .from("profiles")
-        .update({ phone })
-        .eq("auth_user_id", user.id);
-    }
-
-    // 3) Patrón inicial opcional (admin_set_pattern necesita profile_id)
-    if (pattern && user) {
-      const { data: prof } = await supabaseAdmin
-        .from("profiles")
-        .select("id")
-        .eq("auth_user_id", user.id)
-        .maybeSingle();
-
-      if (prof?.id) {
-        await supabaseAdmin.rpc("admin_set_pattern", {
-          p_profile: prof.id,
-          p_plain: pattern,
-        });
-      }
-    }
-
     return res.status(201).json({
       usuarioId: user?.id ?? null,
       email,
+      usuario: username,
       requiereConfirmacion,
       accessToken: data.session?.access_token ?? null,
     });
