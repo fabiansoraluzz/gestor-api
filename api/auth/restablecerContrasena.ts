@@ -17,17 +17,24 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   try {
     const raw = typeof req.body === "string" ? JSON.parse(req.body) : (req.body ?? {});
-    const { accessToken, password } = resetPasswordSchema.parse(raw);
+    const { accessToken, refreshToken, password } = resetPasswordSchema.parse(raw);
 
-    const supa = supabaseServer(accessToken);
+    // 1) Crear cliente sin sesión
+    const supa = supabaseServer();
+
+    // 2) Establecer sesión con los tokens del enlace de recuperación
+    const setRes = await supa.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
+    if (setRes.error || !setRes.data?.session) {
+      return err(res, 401, "AUTH.SESSION_SET_FAILED", "No se pudo establecer la sesión de recuperación", setRes.error?.message);
+    }
+
+    // 3) Actualizar contraseña
     const { data, error } = await supa.auth.updateUser({ password });
-
     if (error) {
       return err(res, 400, "AUTH.RESET_FAILED", "No se pudo actualizar la contraseña", error.message);
     }
-    return ok(res, 200, "AUTH.RESET_OK", "Contraseña actualizada", {
-      userId: data.user?.id,
-    });
+
+    return ok(res, 200, "AUTH.RESET_OK", "Contraseña actualizada", { userId: data.user?.id });
   } catch (e: any) {
     return err(res, 400, "VALIDATION.BAD_REQUEST", extractMessage(e));
   }

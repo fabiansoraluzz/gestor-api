@@ -14,31 +14,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!token) return err(res, 401, "AUTH.MISSING_TOKEN", "Falta token Bearer");
 
   try {
+    // 1) Validar token y obtener uid del usuario
     const supa = supabaseServer(token);
     const { data: userData, error: userErr } = await supa.auth.getUser();
     if (userErr || !userData?.user) return err(res, 401, "AUTH.INVALID_TOKEN", "Token inválido", userErr?.message);
-
     const uid = userData.user.id;
 
-    const { data: perfil, error: perErr } = await supa
+    // 2) Leer perfil con service-role (evita RLS y, por ende, la recursión)
+    const { data: perfil, error: perErr } = await supabaseAdmin
       .from("tblPerfiles")
       .select("id, auth_usuario_id, usuario, correo, nombres, apellidos, avatar_url, activo, creado_en, actualizado_en")
       .eq("auth_usuario_id", uid)
       .single();
 
-    if (perErr) return err(res, 404, "DB.PERFIL_NOT_FOUND", "No se encontró el perfil", perErr.message);
+    if (perErr || !perfil) return err(res, 404, "DB.PERFIL_NOT_FOUND", "No se encontró el perfil", perErr?.message);
 
+    // 3) Leer roles del perfil (también con service-role)
     const { data: rolesRows, error: rolesErr } = await supabaseAdmin
       .from("tblRoles_Usuarios")
       .select("tblRoles(clave)")
       .eq("perfil_id", perfil.id);
 
     if (rolesErr) {
-      // Devolvemos perfil sin roles, pero indicamos en data el error de roles
-      return ok(res, 200, "AUTH.ME_OK_PARTIAL", "Perfil recuperado (roles no disponibles)", {
-        ...perfil,
-        roles: [],
-      });
+      return ok(res, 200, "AUTH.ME_OK_PARTIAL", "Perfil recuperado (roles no disponibles)", { ...perfil, roles: [] });
     }
 
     const roles = (rolesRows ?? [])

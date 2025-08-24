@@ -1,11 +1,8 @@
-// api/lib/validate.ts
 import { z } from "zod";
 
 // Reglas base
 export const email = z.string().trim().email("Correo inválido");
-export const password = z
-  .string()
-  .min(6, "La contraseña debe tener mínimo 6 caracteres");
+export const password = z.string().min(6, "La contraseña debe tener mínimo 6 caracteres");
 
 export const username = z
   .string()
@@ -16,21 +13,13 @@ export const username = z
   .transform((s) => s.toLowerCase());
 
 // ===== Auth: Login =====
-// Acepta { email, password } O { username, password }
 export const loginSchema = z.union([
-  z.object({
-    email,
-    password,
-  }),
-  z.object({
-    username,
-    password,
-  }),
+  z.object({ email, password }),
+  z.object({ username, password }),
 ]);
 export type LoginInput = z.infer<typeof loginSchema>;
 
 // ===== Auth: Register =====
-// (En API exigimos email, aunque en DB sea opcional)
 export const registerSchema = z.object({
   username,
   email,
@@ -47,8 +36,10 @@ export const forgotSchema = z.object({
 });
 
 // ===== Auth: Reset password =====
+// IMPORTANTE: Supabase v2 requiere sesión -> necesitamos access_token y refresh_token del enlace de recuperación
 export const resetPasswordSchema = z.object({
   accessToken: z.string().min(1, "Token inválido"),
+  refreshToken: z.string().min(1, "Refresh token inválido"),
   password,
 });
 export type ResetPasswordInput = z.infer<typeof resetPasswordSchema>;
