@@ -37,14 +37,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     if (error) {
       const msg = String(error.message || error.name || "Error registrando");
-      // Email ya existe en AUTH
+
+      // 1) Email ya existe en Auth
       if (/User already registered/i.test(msg)) {
         return err(res, 409, "AUTH.EMAIL_IN_USE", "El correo ya está registrado", msg);
       }
-      // Error genérico BD/Auth
+
+      // 2) Rate limit / cooldown de Supabase Auth
+      if (/for security purposes, you can only request this after/i.test(msg)) {
+        return err(
+          res,
+          429,
+          "AUTH.RATE_LIMITED",
+          "Demasiadas solicitudes para este correo en poco tiempo. Intenta nuevamente en un momento.",
+          msg
+        );
+      }
+
+      // 3) Error genérico de inserción en Auth
       if (/Database error saving new user/i.test(msg)) {
         return err(res, 400, "DB.AUTH_INSERT_FAILED", "Error en BD al crear usuario", msg);
       }
+
       return err(res, 400, "AUTH.SIGNUP_FAILED", "No se pudo registrar", msg);
     }
 
