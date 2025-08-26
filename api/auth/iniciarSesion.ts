@@ -106,21 +106,27 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         );
       }
 
-      // Manejo de refresh cookie (para rehidratación futura)
-      const remember = !!parsed?.remember;
+      // Cookie de refresh SOLO si remember === true
+      const remember = !!("remember" in parsed ? parsed.remember : false);
       if (remember && data.session?.refresh_token) {
-        setRefreshCookie(res, data.session.refresh_token, true);
+        setRefreshCookie(res, data.session.refresh_token, true); // Max-Age 30d
       } else {
-        // si no quiere recordar, limpiamos si existía
+        // Asegura que no quede cookie previa
         clearRefreshCookie(res);
       }
 
       // Respuesta
-      const payload = shapeSession(
-        { id: data.user.id, email: data.user.email ?? null, user_metadata: data.user.user_metadata },
-        data.session
-      );
-      return ok(res, 200, "AUTH.LOGIN_OK", "Sesión iniciada", payload);
+      return ok(res, 200, "AUTH.LOGIN_OK", "Sesión iniciada", {
+        usuarioId: data.user.id,
+        email: data.user.email ?? null,
+        usuario: data.user.user_metadata?.username ?? null,
+        nombre: data.user.user_metadata?.full_name ?? null,
+        accessToken: data.session?.access_token ?? null,
+        refreshToken: data.session?.refresh_token ?? null,
+        expiresIn: data.session?.expires_in ?? null,
+        tokenType: data.session?.token_type ?? null,
+        remember,
+      });
     } catch (e: any) {
       return err(res, 400, "VALIDATION.BAD_REQUEST", extractMessage(e));
     }
@@ -139,7 +145,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return err(res, 401, "AUTH.REFRESH_FAILED", "No se pudo rehidratar sesión", error?.message);
     }
 
-    // Rotar refresh cookie
+    // Rotar refresh cookie (sigue siendo persistente)
     if (data.session?.refresh_token) {
       setRefreshCookie(res, data.session.refresh_token, true);
     }
