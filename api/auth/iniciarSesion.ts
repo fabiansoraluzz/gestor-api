@@ -1,179 +1,155 @@
 // api/auth/iniciarSesion.ts
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { z } from "zod";
 import { cors } from "../../lib/cors";
 import { supabaseAdmin, supabaseServer } from "../../lib/supabase";
-import { ok, err, extractMessage } from "../../lib/http";
 import { setRefreshCookie, clearRefreshCookie } from "../../lib/cookies";
+import { ok, err, extractMessage } from "../../lib/http";
+import { z } from "zod";
 
+// ===== Schemas =====
 const loginSchema = z.union([
-  z.object({ email: z.string().email(), password: z.string().min(6), remember: z.boolean().optional() }),
   z.object({
-    username: z.string().min(3).max(32).regex(/^[a-z0-9._-]+$/),
+    email: z.string().trim().email(),
+    password: z.string().min(6),
+    remember: z.boolean().optional(),
+  }),
+  z.object({
+    username: z
+      .string()
+      .trim()
+      .min(3)
+      .max(32)
+      .regex(/^[a-z0-9._-]+$/),
     password: z.string().min(6),
     remember: z.boolean().optional(),
   }),
 ]);
 
-function getCookie(req: VercelRequest, name: string): string | null {
-  const c = req.headers.cookie || "";
-  const m = c.split(";").map((s) => s.trim()).find((p) => p.startsWith(name + "="));
-  return m ? decodeURIComponent(m.split("=").slice(1).join("=")) : null;
+// ===== Utils =====
+function getCookie(req: VercelRequest, name: string) {
+  const raw = req.headers.cookie || "";
+  const m = raw.match(new RegExp(`(?:^|; )${name}=([^;]*)`));
+  return m ? decodeURIComponent(m[1]) : null;
 }
 
-function sanitizeBase(u: string | null | undefined) {
-  const base = (u ?? "").toLowerCase().replace(/[^a-z0-9._-]/g, "").slice(0, 32);
-  return base.length >= 3 ? base : "user";
+// Firma flexible: Supabase v2 expone user.email?: string
+function shapeSession(
+  user: { id: string; email: string | null | undefined; user_metadata?: any },
+  session: any | null
+) {
+  const meta = user.user_metadata || {};
+  const email = user.email ?? null;
+  const username: string | undefined = meta.username;
+  const fullName: string | undefined = meta.full_name;
+  const nombre =
+    (fullName && fullName.trim()) ||
+    username ||
+    (email ? email.split("@")[0] : undefined) ||
+    "Usuario";
+
+  return {
+    usuarioId: user.id,
+    email,
+    usuario: username ?? undefined,
+    nombre,
+    accessToken: session?.access_token ?? null,
+    refreshToken: session?.refresh_token ?? null,
+    expiresIn: session?.expires_in ?? null,
+    tokenType: session?.token_type ?? null,
+  };
 }
 
-// ⚠️ Tipo permite email undefined | null
-type MinimalUser = { id: string; email?: string | null; user_metadata?: any };
-
-async function ensurePerfil(user: MinimalUser) {
-  const { data: existente } = await supabaseAdmin
-    .from("tblPerfiles")
-    .select("id")
-    .eq("auth_usuario_id", user.id)
-    .maybeSingle();
-  if (existente?.id) return existente.id;
-
-  const meta = user.user_metadata ?? {};
-  const base = sanitizeBase(meta.username ?? (user.email?.split?.("@")?.[0] ?? "user"));
-  let candidato = base;
-
-  for (let i = 0; i < 7; i++) {
-    const { data: dup } = await supabaseAdmin
-      .from("tblPerfiles")
-      .select("id")
-      .eq("usuario", candidato)
-      .maybeSingle();
-    if (!dup?.id) break;
-    candidato =
-      i < 5
-        ? `${base}-${String(i + 1).padStart(2, "0")}`.slice(0, 32)
-        : `${base}-${Math.random().toString(36).slice(2, 6)}`.slice(0, 32);
-  }
-
-  const { data: ins, error: insErr } = await supabaseAdmin
-    .from("tblPerfiles")
-    .insert({
-      auth_usuario_id: user.id,
-      usuario: candidato,
-      correo: user.email?.toLowerCase() ?? null,
-      activo: true,
-    })
-    .select("id")
-    .single();
-
-  if (insErr?.code === "23505") {
-    const { data: again } = await supabaseAdmin
-      .from("tblPerfiles")
-      .select("id")
-      .eq("auth_usuario_id", user.id)
-      .maybeSingle();
-    if (again?.id) return again.id;
-  }
-
-  const perfilId = ins?.id ?? null;
-  if (perfilId) {
-    const { data: rol } = await supabaseAdmin.from("tblRoles").select("id").eq("clave", "Empleado").single();
-    if (rol?.id) await supabaseAdmin.from("tblRoles_Usuarios").insert({ perfil_id: perfilId, rol_id: rol.id });
-  }
-  return perfilId;
-}
-
+// ===== Handler =====
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (cors(req, res)) return;
 
-  try {
-    if (req.method === "GET") {
-      const rt = getCookie(req, "sb-refresh");
-      if (!rt) return err(res, 401, "AUTH.NO_REFRESH_COOKIE", "No hay cookie de sesión");
+  // POST => login con credenciales
+  if (req.method === "POST") {
+    try {
+      const raw = typeof req.body === "string" ? JSON.parse(req.body) : (req.body ?? {});
+      const parsed = loginSchema.parse(raw);
 
-      const supa = supabaseServer();
-      const { data, error } = await supa.auth.refreshSession({ refresh_token: rt });
-      if (error || !data?.session || !data.user) {
-        clearRefreshCookie(res);
-        return err(res, 401, "AUTH.REFRESH_FAILED", "No se pudo refrescar la sesión", error?.message);
+      // Resolver email si viene username
+      let email: string | null = null;
+      if ("email" in parsed) {
+        email = parsed.email.toLowerCase();
+      } else {
+        const { data: row, error } = await supabaseAdmin
+          .from("tblPerfiles")
+          .select("correo")
+          .eq("usuario", parsed.username.toLowerCase())
+          .maybeSingle();
+        if (error) {
+          return err(res, 500, "DB.SELECT_FAILED", "No se pudo resolver el usuario", error.message);
+        }
+        if (!row?.correo) {
+          return err(res, 401, "AUTH.INVALID_CREDENTIALS", "Usuario o contraseña inválidos");
+        }
+        email = (row.correo as string).toLowerCase();
       }
 
-      await ensurePerfil({ id: data.user.id, email: data.user.email ?? null, user_metadata: data.user.user_metadata });
-
-      setRefreshCookie(res, data.session.refresh_token!, true);
-
-      return ok(res, 200, "AUTH.REFRESH_OK", "Sesión rehidratada", {
-        usuarioId: data.user.id,
-        email: data.user.email ?? null,
-        usuario: (data.user.user_metadata?.username as string | undefined) ?? null,
-        nombre:
-          (data.user.user_metadata?.full_name as string | undefined) ??
-          data.user.email?.split("@")[0] ??
-          null,
-        accessToken: data.session.access_token,
-        refreshToken: data.session.refresh_token,
-        expiresIn: data.session.expires_in,
-        tokenType: data.session.token_type,
+      // Login Supabase
+      const supa = supabaseServer();
+      const { data, error } = await supa.auth.signInWithPassword({
+        email: email!,
+        password: parsed.password,
       });
+
+      if (error || !data?.user) {
+        // Propagamos razón (ej. Email not confirmed) en data[]
+        return err(
+          res,
+          401,
+          "AUTH.INVALID_CREDENTIALS",
+          "Usuario o contraseña inválidos",
+          error?.message
+        );
+      }
+
+      // Manejo de refresh cookie (para rehidratación futura)
+      const remember = !!parsed?.remember;
+      if (remember && data.session?.refresh_token) {
+        setRefreshCookie(res, data.session.refresh_token, true);
+      } else {
+        // si no quiere recordar, limpiamos si existía
+        clearRefreshCookie(res);
+      }
+
+      // Respuesta
+      const payload = shapeSession(
+        { id: data.user.id, email: data.user.email ?? null, user_metadata: data.user.user_metadata },
+        data.session
+      );
+      return ok(res, 200, "AUTH.LOGIN_OK", "Sesión iniciada", payload);
+    } catch (e: any) {
+      return err(res, 400, "VALIDATION.BAD_REQUEST", extractMessage(e));
     }
+  }
 
-    if (req.method !== "POST") {
-      return err(res, 405, "HTTP.METHOD_NOT_ALLOWED", "Método no permitido");
-    }
-
-    const ct = req.headers["content-type"] || "";
-    if (!ct.toString().includes("application/json")) {
-      return err(res, 415, "VALIDATION.UNSUPPORTED_CONTENT_TYPE", "Content-Type debe ser application/json");
-    }
-
-    const raw = typeof req.body === "string" ? JSON.parse(req.body) : (req.body ?? {});
-    const parsed = loginSchema.parse(raw);
-    const remember = "remember" in parsed ? !!parsed.remember : false;
-
-    let emailToUse: string | null = null;
-    if ("email" in parsed) {
-      emailToUse = parsed.email.toLowerCase();
-    } else {
-      const { data: row, error: qErr } = await supabaseAdmin
-        .from("tblPerfiles")
-        .select("correo")
-        .eq("usuario", parsed.username.toLowerCase())
-        .maybeSingle();
-      if (qErr) return err(res, 500, "DB.QUERY_FAILED", "Error consultando usuario", qErr.message);
-      if (!row?.correo) return err(res, 401, "AUTH.INVALID_CREDENTIALS", "Usuario o contraseña inválidos");
-      emailToUse = row.correo as string;
+  // GET => rehidratación por cookie HttpOnly (refresh)
+  if (req.method === "GET") {
+    const refresh = getCookie(req, "sb-refresh");
+    if (!refresh) {
+      return err(res, 401, "AUTH.NO_REFRESH_COOKIE", "No hay cookie de sesión");
     }
 
     const supa = supabaseServer();
-    const { data, error } = await supa.auth.signInWithPassword({
-      email: emailToUse!,
-      password: parsed.password,
-    });
-
-    if (error || !data?.session || !data?.user) {
-      const extras = /Email not confirmed/i.test(error?.message || "") ? "Email not confirmed" : undefined;
-      return err(res, 401, "AUTH.INVALID_CREDENTIALS", "Usuario o contraseña inválidos", extras);
+    const { data, error } = await supa.auth.refreshSession({ refresh_token: refresh });
+    if (error || !data?.user) {
+      return err(res, 401, "AUTH.REFRESH_FAILED", "No se pudo rehidratar sesión", error?.message);
     }
 
-    await ensurePerfil({ id: data.user.id, email: data.user.email ?? null, user_metadata: data.user.user_metadata });
+    // Rotar refresh cookie
+    if (data.session?.refresh_token) {
+      setRefreshCookie(res, data.session.refresh_token, true);
+    }
 
-    if (remember && data.session.refresh_token) setRefreshCookie(res, data.session.refresh_token, true);
-    else clearRefreshCookie(res);
-
-    return ok(res, 200, "AUTH.LOGIN_OK", "Inicio de sesión correcto", {
-      usuarioId: data.user.id,
-      email: data.user.email ?? null,
-      usuario: (data.user.user_metadata?.username as string | undefined) ?? null,
-      nombre:
-        (data.user.user_metadata?.full_name as string | undefined) ??
-        data.user.email?.split("@")[0] ??
-        null,
-      accessToken: data.session.access_token,
-      refreshToken: data.session.refresh_token,
-      expiresIn: data.session.expires_in,
-      tokenType: data.session.token_type,
-      remember,
-    });
-  } catch (e: any) {
-    return err(res, 400, "VALIDATION.BAD_REQUEST", extractMessage(e));
+    const payload = shapeSession(
+      { id: data.user.id, email: data.user.email ?? null, user_metadata: data.user.user_metadata },
+      data.session
+    );
+    return ok(res, 200, "AUTH.REFRESH_OK", "Sesión rehidratada", payload);
   }
+
+  return err(res, 405, "HTTP.METHOD_NOT_ALLOWED", "Método no permitido");
 }
